@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { AlertCircle, AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertCircle, AlertTriangle, RefreshCw, Lock } from "lucide-react";
 import Topbar from "./Topbar";
 import Sidebar from "./Sidebar";
 import UniversalCommandPalette from "./UniversalCommandPalette";
