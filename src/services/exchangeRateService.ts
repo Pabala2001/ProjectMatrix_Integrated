@@ -1,4 +1,3 @@
-import { assertOperationalAction } from "../integration/operationalAccess";
 /**
  * Live Foreign Exchange Rate Service
  * 
@@ -121,7 +120,9 @@ export class ExchangeRateService {
     // Auto-fetch fresh rates on creation in background
     if (typeof window !== "undefined") {
       setTimeout(() => {
-        this.fetchLiveRates();
+        void this.fetchLiveRates().catch((error) => {
+          console.warn("Background FX refresh failed; retaining cached rates:", error);
+        });
       }, 100);
     }
   }
@@ -174,7 +175,8 @@ export class ExchangeRateService {
   }
 
   private saveRates(rates: ExchangeRates, source: string, customTimestamp?: string): void {
-    assertOperationalAction("write", "services/exchangeRateService.ts");
+    // This cache contains public market rates, not company or billing records.
+    // It must be usable while the public screens are open before sign-in.
     if (typeof window === "undefined") return;
     try {
       const now = new Date();

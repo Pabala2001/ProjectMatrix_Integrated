@@ -1,4 +1,3 @@
-import { assertOperationalAction } from "../../integration/operationalAccess";
 import {
   executeSiteDiaryCount,
   executeSiteDiaryDateRange,
@@ -171,7 +170,6 @@ function createParsedDate(
   month: number,
   day: number
 ): { specificDate: string; formatted: string } | null {
-    assertOperationalAction("create", "services/projectAdvisorV2/intentRouter.ts");
   if (!isValidCalendarDate(year, month, day)) {
     return null;
   }
@@ -438,7 +436,6 @@ export function detectTargetField(question: string): TargetField {
 }
 
 function removeRecognisedDates(text: string): string {
-    assertOperationalAction("delete", "services/projectAdvisorV2/intentRouter.ts");
   let result = text;
 
   for (const pattern of DATE_PATTERNS) {
@@ -449,7 +446,6 @@ function removeRecognisedDates(text: string): string {
 }
 
 function removeRecognisedCategories(text: string): string {
-    assertOperationalAction("delete", "services/projectAdvisorV2/intentRouter.ts");
   let result = text;
 
   for (const category of ALLOWED_CATEGORIES) {

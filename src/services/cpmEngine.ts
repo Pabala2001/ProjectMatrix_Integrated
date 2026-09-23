@@ -1,4 +1,3 @@
-import { assertOperationalAction } from "../integration/operationalAccess";
 import {
   ProjectCalendar,
   EngineActivity,
@@ -117,7 +116,7 @@ export function snapToPrevWorkingDay(date: Date, calendar: ProjectCalendar): Dat
  * If duration = 0 (milestone), start = finish.
  */
 export function addWorkingDays(startDate: Date, durationDays: number, calendar: ProjectCalendar): Date {
-    assertOperationalAction("create", "services/cpmEngine.ts");
+  // Pure date calculation. Access checks belong on persisted schedule changes.
   if (durationDays <= 0) {
     return new Date(startDate);
   }
