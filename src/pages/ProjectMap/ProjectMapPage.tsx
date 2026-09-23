@@ -46,7 +46,6 @@ interface ValidationErrors {
 
 // Custom Leaflet DivIcons for clean aesthetic
 const createCustomIcon = (color: string, label: string) => {
-    assertOperationalAction("create", "pages/ProjectMap/ProjectMapPage.tsx");
   return L.divIcon({
     className: "custom-leaflet-marker",
     html: `
