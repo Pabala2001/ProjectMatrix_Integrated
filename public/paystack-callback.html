@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Returning to ProjectMatrix</title></head>
+<body>
+<p id="status">Returning to your ProjectMatrix subscription…</p>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const reference = params.get('reference') || params.get('trxref');
+  if (!reference || !/^PAY-\d{8}-[0-9A-F]{32}$/.test(reference) ||
+      (params.get('reference') && params.get('trxref') && params.get('reference') !== params.get('trxref'))) {
+    document.getElementById('status').textContent = 'The payment reference is missing or invalid. Open ProjectMatrix Billing to check your payment.';
+    return;
+  }
+  try { sessionStorage.setItem('projectmatrix:paystack-return', reference); } catch {}
+  // This query is only a reference for server verification, never proof of payment.
+  const app = new URL('./', location.href);
+  app.search = '';
+  app.hash = '/billing/subscriptions?reference=' + encodeURIComponent(reference);
+  location.replace(app.href);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,241 @@
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+/* Target elements when .dark is present */
+.dark {
+  color-scheme: dark;
+}
+
+/* Light Theme Base Palette Defaults */
+body {
+  background-color: #F7F8FA;
+  color: #172033;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Dark Mode Viewport Background */
+.dark body,
+.dark #projectmatrix-root,
+.dark main,
+.dark .bg-slate-50,
+.dark .bg-slate-50\/70,
+.dark .bg-slate-50\/50,
+.dark .bg-slate-50\/80,
+.dark .bg-slate-100 {
+  background-color: #070F1E !important;
+}
+
+/* Dark Mode Cards, Tables, Panels, Dialog Modals */
+.dark .bg-white,
+.dark #projectmatrix-topbar,
+.dark #projectmatrix-sidebar,
+.dark .bg-slate-100\/80,
+.dark .bg-slate-200,
+.dark .bg-slate-200\/55,
+.dark .bg-slate-200\/50,
+.dark .bg-slate-50\/40,
+.dark .bg-slate-50\/10,
+.dark .bg-amber-50\/10,
+.dark .bg-indigo-50\/50,
+.dark .bg-indigo-50 {
+  background-color: #0B172A !important;
+  color: #F8FAFC !important;
+}
+
+/* Slight hover elements and nested items */
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-100:hover,
+.dark .hover\:bg-slate-55:hover,
+.dark .hover\:bg-slate-50\/80:hover,
+.dark .hover\:bg-slate-100\/80:hover {
+  background-color: #162238 !important;
+}
+
+/* Borders styling */
+.dark .border,
+.dark .border-b,
+.dark .border-t,
+.dark .border-r,
+.dark .border-l,
+.dark .border-gray-55,
+.dark .border-gray-100,
+.dark .border-gray-150,
+.dark .border-gray-200,
+.dark .border-gray-300,
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .border-slate-300 {
+  border-color: #1E293B !important;
+}
+
+/* Text overrides */
+.dark {
+  color: #94A3B8 !important;
+}
+
+.dark .text-slate-800,
+.dark .text-slate-900,
+.dark .text-gray-900,
+.dark .text-slate-700,
+.dark .text-slate-655,
+.dark .text-slate-650,
+.dark .text-gray-800,
+.dark .text-gray-700,
+.dark .text-slate-600,
+.dark .text-slate-950,
+.dark .text-gray-950 {
+  color: #F8FAFC !important;
+}
+
+.dark .text-slate-500,
+.dark .text-slate-450,
+.dark .text-slate-400,
+.dark .text-gray-550,
+.dark .text-gray-500,
+.dark .text-gray-400 {
+  color: #94A3B8 !important;
+}
+
+/* Header Text */
+.dark h1,
+.dark h2,
+.dark h3,
+.dark h4,
+.dark h5,
+.dark h6 {
+  color: #F8FAFC !important;
+}
+
+/* Inputs, drop-downs, select-options and textareas */
+.dark select,
+.dark input,
+.dark textarea {
+  background-color: #070F1E !important;
+  color: #F8FAFC !important;
+  border-color: #1E293B !important;
+}
+
+.dark select option {
+  background-color: #0B172A !important;
+  color: #F8FAFC !important;
+}
+
+/* Recharts / SVG charts overrides in Dark Mode */
+.dark .recharts-cartesian-axis-tick text,
+.dark .recharts-text,
+.dark .recharts-legend-item-text {
+  fill: #94A3B8 !important;
+}
+
+.dark .recharts-cartesian-grid-horizontal line,
+.dark .recharts-cartesian-grid-vertical line {
+  stroke: #1E293B !important;
+}
+
+/* Controls Page Container Table Constraints & Strict Containment */
+.controls-page-container table {
+  table-layout: fixed !important;
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+.controls-page-container table th,
+.controls-page-container table td {
+  table-layout: fixed !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  max-width: 100% !important;
+  word-wrap: break-word;
+}
+
+.controls-page-container table thead,
+.controls-page-container table tbody,
+.controls-page-container table tfoot,
+.controls-page-container table tr {
+  max-width: 100% !important;
+  overflow: hidden !important;
+}
+
+.controls-page-container table th *,
+.controls-page-container table td * {
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.controls-page-container table div,
+.controls-page-container table span,
+.controls-page-container table p,
+.controls-page-container table a,
+.controls-page-container table button {
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+/* Card & Data Overflow Containment Fix (Scoped to in-flow content, excluding floating dropdowns/menus/dialogs) */
+.grid,
+.grid > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.flex > * {
+  min-width: 0;
+}
+
+.card {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Scoped rounded containers text-wrapping, excluding absolute dropdowns and menus */
+:not(.absolute):not([role="listbox"]):not([role="menu"]):not([data-dropdown]):not(.header-dropdown)[class*="rounded-lg"],
+:not(.absolute):not([role="listbox"]):not([role="menu"]):not([data-dropdown]):not(.header-dropdown)[class*="rounded-xl"],
+:not(.absolute):not([role="listbox"]):not([role="menu"]):not([data-dropdown]):not(.header-dropdown)[class*="rounded-2xl"],
+:not(.absolute):not([role="listbox"]):not([role="menu"]):not([data-dropdown]):not(.header-dropdown)[class*="rounded-3xl"] {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* Prevent text, stats, values and data records from breaching standard card boundaries */
+.card * {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.card h1, .card h2, .card h3, .card h4, .card h5, .card h6,
+.card p, .card span, .card div, .card strong, .card em {
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+/* Explicit immunity and styling for header dropdowns, popovers and floating menus */
+.header-dropdown,
+[data-dropdown],
+[role="listbox"],
+[role="menu"],
+header .absolute,
+.absolute.z-50 {
+  min-width: max-content;
+  max-width: calc(100vw - 24px) !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  white-space: normal !important;
+}
+
+.header-dropdown *,
+[data-dropdown] *,
+[role="listbox"] *,
+[role="menu"] *,
+header .absolute *,
+.absolute.z-50 * {
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+}
+
+

@@ -1,0 +1,8 @@
+{
+  "name": "ProjectMatrix",
+  "description": "ProjectMatrix integrated frontend: partner workspace and authentication screens with primary Supabase authentication, onboarding, billing and subscription workflows. New module persistence is being integrated.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,1148 @@
+import { deepStrictEqual, ok } from "node:assert/strict";
+import {
+  deleteCommunicationDocumentFileLifecycle,
+  DeleteLifecycleDeps,
+  mapDbToCommDocument,
+  saveCommunicationDocumentFileLifecycle,
+  SaveLifecycleDeps,
+} from "./communicationDocumentFileLifecycle";
+import {
+  ProjectAdvisorFileIndexResult,
+  ProjectAdvisorFileIndexServiceError,
+} from "../../services/projectAdvisorFileIndexService";
+
+function assertEquals<T>(actual: T, expected: T, message?: string): void {
+  deepStrictEqual(actual, expected, message);
+}
+
+function assert(value: unknown, message?: string): asserts value {
+  ok(value, message);
+}
+
+function createDummyFile(name = "test.pdf", type = "application/pdf"): File {
+  return new File(["test content"], name, { type });
+}
+
+Deno.test("0. Mapper: A signed-only database row never maps to an uploaded source", () => {
+  const row = {
+    id: "doc-signed-only",
+    company_id: "comp-1",
+    project_id: "proj-1",
+    folder_name: "folder",
+    signed_file_path: "signed/file.pdf",
+    signed_file_name: "signed.pdf",
+    signed_file_type: "application/pdf",
+    signed_file_size: 1024,
+  };
+  const doc = mapDbToCommDocument(row);
+  assertEquals(doc.uploadedFilePath, undefined);
+  assertEquals(doc.uploadedFileName, undefined);
+  assertEquals(doc.uploadedFileType, undefined);
+  assertEquals(doc.uploadedFileSize, undefined);
+  assertEquals(doc.signedFilePath, "signed/file.pdf");
+  assertEquals(doc.signedFileName, "signed.pdf");
+});
+
+Deno.test("1. New file: upload -> insert -> index ordering", async () => {
+  const executionOrder: string[] = [];
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async (path, _file) => {
+      executionOrder.push("upload");
+      assert(path.includes("test.pdf"));
+      return { error: null };
+    },
+    insertDatabaseRow: async (_payload) => {
+      executionOrder.push("insert");
+      return { data: { id: "doc-new-1" }, error: null };
+    },
+    updateDatabaseRow: async () => {
+      throw new Error("Should not update on new file insert");
+    },
+    removeStorageFiles: async () => {
+      throw new Error("Should not remove files on new file insert");
+    },
+    indexSource: async (id, sourceKind) => {
+      executionOrder.push("index");
+      assertEquals(sourceKind, "uploaded");
+      return {
+        status: "ready",
+        providerDocumentName: "store/doc-1",
+      };
+    },
+  };
+
+  const dummyFile = createDummyFile("test.pdf");
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-new-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "si",
+      payload: { document_title: "New SI" },
+      uploadedFile: dummyFile,
+      existingDoc: null,
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(executionOrder, ["upload", "insert", "index"]);
+});
+
+Deno.test("2. Metadata-only save with an existing uploaded path re-invokes indexing", async () => {
+  const executionOrder: string[] = [];
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => {
+      throw new Error("No upload expected for metadata-only edit");
+    },
+    insertDatabaseRow: async () => {
+      throw new Error("No insert expected for edit");
+    },
+    updateDatabaseRow: async (id, _comp, _proj, _payload) => {
+      executionOrder.push("update");
+      assertEquals(id, "doc-existing-1");
+      return { data: { id: "doc-existing-1" }, error: null };
+    },
+    removeStorageFiles: async () => {
+      throw new Error("No storage removal expected for metadata edit");
+    },
+    indexSource: async (id, sourceKind) => {
+      executionOrder.push("index");
+      assertEquals(id, "doc-existing-1");
+      assertEquals(sourceKind, "uploaded");
+      return {
+        status: "ready",
+        providerDocumentName: "store/doc-existing-1",
+      };
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-existing-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "si",
+      payload: { document_title: "Updated Title Only" },
+      uploadedFile: null,
+      existingDoc: {
+        id: "doc-existing-1",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: "comp-1/proj-1/si/doc-existing-1/file.pdf",
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(executionOrder, ["update", "index"]);
+});
+
+Deno.test("3. No uploaded source means no index call", async () => {
+  let indexCallCount = 0;
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-no-file-1" }, error: null }),
+    updateDatabaseRow: async () => ({ data: { id: "doc-no-file-1" }, error: null }),
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => {
+      indexCallCount++;
+      return { status: "ready" };
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-no-file-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "rfi",
+      payload: { document_title: "Draft without file" },
+      uploadedFile: null,
+      existingDoc: null,
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(indexCallCount, 0);
+});
+
+Deno.test("4. Replacement retains the same document ID", async () => {
+  const targetId = "doc-replacement-uuid";
+  const usedIds: string[] = [];
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async (path) => {
+      assert(path.includes(targetId));
+      return { error: null };
+    },
+    insertDatabaseRow: async () => ({ data: { id: targetId }, error: null }),
+    updateDatabaseRow: async (id) => {
+      usedIds.push(id);
+      return { data: { id: targetId }, error: null };
+    },
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async (id) => {
+      usedIds.push(id);
+      return { status: "ready" };
+    },
+  };
+
+  const replacementFile = createDummyFile("v2.pdf");
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: targetId,
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "minutes",
+      payload: { document_title: "Meeting Minutes V2" },
+      uploadedFile: replacementFile,
+      existingDoc: {
+        id: targetId,
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: "comp-1/proj-1/minutes/doc-replacement-uuid/v1.pdf",
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(result.documentId, targetId);
+  assertEquals(usedIds, [targetId, targetId]);
+});
+
+Deno.test("5. Replacement indexes before eligible old Storage cleanup", async () => {
+  const executionOrder: string[] = [];
+  const removedPaths: string[] = [];
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => {
+      executionOrder.push("upload_new");
+      return { error: null };
+    },
+    insertDatabaseRow: async () => ({ data: { id: "doc-1" }, error: null }),
+    updateDatabaseRow: async () => {
+      executionOrder.push("update_db");
+      return { data: { id: "doc-1" }, error: null };
+    },
+    removeStorageFiles: async (paths) => {
+      executionOrder.push("remove_old_storage");
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => {
+      executionOrder.push("index");
+      return { status: "ready" };
+    },
+  };
+
+  const oldPath = "comp-1/proj-1/folder/doc-1/v1.pdf";
+  const newFile = createDummyFile("v2.pdf");
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Replaced" },
+      uploadedFile: newFile,
+      existingDoc: {
+        id: "doc-1",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: oldPath,
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(executionOrder, [
+    "upload_new",
+    "update_db",
+    "index",
+    "remove_old_storage",
+  ]);
+  assertEquals(removedPaths, [oldPath]);
+});
+
+Deno.test("6. Upload failure preserves the old source", async () => {
+  let dbUpdateCalled = false;
+  let storageRemoveCalled = false;
+  let indexCalled = false;
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => {
+      return { error: new Error("Network upload failed") };
+    },
+    insertDatabaseRow: async () => ({ data: { id: "doc-fail-upload" }, error: null }),
+    updateDatabaseRow: async () => {
+      dbUpdateCalled = true;
+      return { data: { id: "doc-fail-upload" }, error: null };
+    },
+    removeStorageFiles: async () => {
+      storageRemoveCalled = true;
+      return { error: null };
+    },
+    indexSource: async () => {
+      indexCalled = true;
+      return { status: "ready" };
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-fail-upload",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Fail Upload" },
+      uploadedFile: createDummyFile("fail.pdf"),
+      existingDoc: {
+        id: "doc-fail-upload",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: "old/path.pdf",
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, false);
+  assertEquals(result.error, "Failed to upload document file.");
+  assertEquals(dbUpdateCalled, false);
+  assertEquals(storageRemoveCalled, false);
+  assertEquals(indexCalled, false);
+});
+
+Deno.test("7. DB update failure preserves old source and removes newly uploaded object", async () => {
+  const removedPaths: string[] = [];
+  let oldPathRemoved = false;
+  let indexCalled = false;
+
+  const oldPath = "old/path.pdf";
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-fail-db" }, error: null }),
+    updateDatabaseRow: async () => {
+      return { error: new Error("DB Constraint Error") };
+    },
+    removeStorageFiles: async (paths) => {
+      if (paths.includes(oldPath)) {
+        oldPathRemoved = true;
+      }
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => {
+      indexCalled = true;
+      return { status: "ready" };
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-fail-db",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Fail DB" },
+      uploadedFile: createDummyFile("new.pdf"),
+      existingDoc: {
+        id: "doc-fail-db",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: oldPath,
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, false);
+  assertEquals(
+    result.error,
+    "Failed to update document record in database.",
+  );
+  assertEquals(oldPathRemoved, false);
+  assertEquals(indexCalled, false);
+  assert(removedPaths.length === 1);
+  assert(!removedPaths.includes(oldPath));
+});
+
+Deno.test("8. Index failure keeps the locally saved replacement and performs no automatic retry", async () => {
+  let indexAttempts = 0;
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-index-fail" }, error: null }),
+    updateDatabaseRow: async () => ({ data: { id: "doc-index-fail" }, error: null }),
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => {
+      indexAttempts++;
+      throw new ProjectAdvisorFileIndexServiceError(
+        "FILE_INDEX_INTERNAL_ERROR",
+        true,
+      );
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-index-fail",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Index Fail Test" },
+      uploadedFile: createDummyFile("doc.pdf"),
+      existingDoc: null,
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(indexAttempts, 1);
+  assert(Boolean(result.warning));
+  assert(result.warning?.includes("temporarily unavailable"));
+});
+
+Deno.test("9. ready, noop and unsupported outcomes", async () => {
+  // ready
+  const readyDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "ready-doc" }, error: null }),
+    updateDatabaseRow: async () => ({ data: { id: "ready-doc" }, error: null }),
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => ({ status: "ready" }),
+  };
+  const readyRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "ready-doc",
+      companyId: "c",
+      projectId: "p",
+      folderName: "f",
+      payload: {},
+      uploadedFile: createDummyFile("a.pdf"),
+      existingDoc: null,
+    },
+    readyDeps,
+  );
+  assertEquals(readyRes.success, true);
+  assertEquals(readyRes.indexResult?.status, "ready");
+
+  // noop
+  const noopDeps: SaveLifecycleDeps = {
+    ...readyDeps,
+    insertDatabaseRow: async () => ({ data: { id: "noop-doc" }, error: null }),
+    indexSource: async () => ({ status: "noop" }),
+  };
+  const noopRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "noop-doc",
+      companyId: "c",
+      projectId: "p",
+      folderName: "f",
+      payload: {},
+      uploadedFile: createDummyFile("a.pdf"),
+      existingDoc: null,
+    },
+    noopDeps,
+  );
+  assertEquals(noopRes.success, true);
+  assertEquals(noopRes.indexResult?.status, "noop");
+
+  // unsupported
+  const unsupportedDeps: SaveLifecycleDeps = {
+    ...readyDeps,
+    insertDatabaseRow: async () => ({ data: { id: "unsupported-doc" }, error: null }),
+    indexSource: async () => ({ status: "unsupported" }),
+  };
+  const unsupportedRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "unsupported-doc",
+      companyId: "c",
+      projectId: "p",
+      folderName: "f",
+      payload: {},
+      uploadedFile: createDummyFile("a.xyz"),
+      existingDoc: null,
+    },
+    unsupportedDeps,
+  );
+  assertEquals(unsupportedRes.success, true);
+  assert(unsupportedRes.warning?.includes("unavailable to Project Advisor"));
+});
+
+Deno.test("10. Full deletion calls index cleanup before Storage and database deletion", async () => {
+  const executionOrder: string[] = [];
+
+  const mockDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async (id) => {
+      executionOrder.push("delete_index");
+      assertEquals(id, "doc-delete-1");
+    },
+    removeStorageFiles: async (paths) => {
+      executionOrder.push("remove_storage");
+      assertEquals(paths, ["uploaded/file.pdf"]);
+      return { error: null };
+    },
+    deleteDatabaseRow: async (id) => {
+      executionOrder.push("delete_db");
+      assertEquals(id, "doc-delete-1");
+      return { data: { id: "doc-delete-1" }, error: null };
+    },
+  };
+
+  const result = await deleteCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-delete-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      uploadedFilePath: "uploaded/file.pdf",
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(executionOrder, ["delete_index", "remove_storage", "delete_db"]);
+});
+
+Deno.test("11. Index failure prevents every later deletion step", async () => {
+  let storageCalled = false;
+  let dbCalled = false;
+
+  const mockDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async () => {
+      throw new Error("Index service failed");
+    },
+    removeStorageFiles: async () => {
+      storageCalled = true;
+      return { error: null };
+    },
+    deleteDatabaseRow: async () => {
+      dbCalled = true;
+      return { data: { id: "doc-delete-index-fail" }, error: null };
+    },
+  };
+
+  const result = await deleteCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-delete-index-fail",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      uploadedFilePath: "uploaded/file.pdf",
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, false);
+  assert(result.error?.includes("The document could not be deleted safely"));
+  assertEquals(storageCalled, false);
+  assertEquals(dbCalled, false);
+});
+
+Deno.test("12. Storage failure prevents database deletion", async () => {
+  let indexCalled = false;
+  let dbCalled = false;
+
+  const mockDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async () => {
+      indexCalled = true;
+    },
+    removeStorageFiles: async () => {
+      return { error: new Error("Storage delete failed") };
+    },
+    deleteDatabaseRow: async () => {
+      dbCalled = true;
+      return { data: { id: "doc-delete-storage-fail" }, error: null };
+    },
+  };
+
+  const result = await deleteCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-delete-storage-fail",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      uploadedFilePath: "uploaded/file.pdf",
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, false);
+  assertEquals(indexCalled, true);
+  assertEquals(dbCalled, false);
+  assert(result.error?.includes("The document could not be deleted safely"));
+});
+
+Deno.test("13. Storage paths are deduplicated", async () => {
+  let passedPaths: string[] = [];
+
+  const mockDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async () => {},
+    removeStorageFiles: async (paths) => {
+      passedPaths = paths;
+      return { error: null };
+    },
+    deleteDatabaseRow: async () => ({ data: { id: "doc-dedup-paths" }, error: null }),
+  };
+
+  const result = await deleteCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-dedup-paths",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      uploadedFilePath: "same/path.pdf",
+      signedFilePath: "same/path.pdf",
+      generatedDocxPath: "different/generated.docx",
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(passedPaths, ["same/path.pdf", "different/generated.docx"]);
+});
+
+Deno.test("14. UI success occurs only after database deletion succeeds", async () => {
+  // Fail case
+  const failDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async () => {},
+    removeStorageFiles: async () => ({ error: null }),
+    deleteDatabaseRow: async () => ({ data: null, error: new Error("DB Error") }),
+  };
+
+  const failRes = await deleteCommunicationDocumentFileLifecycle(
+    { documentId: "doc-db-fail", companyId: "c", projectId: "p", uploadedFilePath: "f.pdf" },
+    failDeps,
+  );
+  assertEquals(failRes.success, false);
+
+  // Success case
+  const successDeps: DeleteLifecycleDeps = {
+    ...failDeps,
+    deleteDatabaseRow: async () => ({ data: { id: "doc-db-ok" }, error: null }),
+  };
+
+  const successRes = await deleteCommunicationDocumentFileLifecycle(
+    { documentId: "doc-db-ok", companyId: "c", projectId: "p", uploadedFilePath: "f.pdf" },
+    successDeps,
+  );
+  assertEquals(successRes.success, true);
+});
+
+Deno.test("15. Distinct signed attachment: signed_file_* metadata preserved and old upload removed", async () => {
+  let updatedPayload: Record<string, unknown> = {};
+  const removedPaths: string[] = [];
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-distinct-signed" }, error: null }),
+    updateDatabaseRow: async (_id, _c, _p, payload) => {
+      updatedPayload = payload;
+      return { data: { id: "doc-distinct-signed" }, error: null };
+    },
+    removeStorageFiles: async (paths) => {
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-distinct-signed",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Distinct Signed Test" },
+      uploadedFile: createDummyFile("replacement.pdf"),
+      existingDoc: {
+        id: "doc-distinct-signed",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: "comp-1/proj-1/folder/doc-distinct-signed/old_upload.pdf",
+        signedFilePath: "comp-1/proj-1/folder/doc-distinct-signed/distinct_signed.pdf",
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(updatedPayload.signed_file_path, undefined);
+  assertEquals(updatedPayload.signed_file_name, undefined);
+  assertEquals(removedPaths, ["comp-1/proj-1/folder/doc-distinct-signed/old_upload.pdf"]);
+});
+
+Deno.test("16. Legacy mirrored signed path: signed_file_* metadata updated and old upload removed", async () => {
+  let updatedPayload: Record<string, unknown> = {};
+  const removedPaths: string[] = [];
+
+  const oldPath = "comp-1/proj-1/folder/doc-mirrored/old.pdf";
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-mirrored" }, error: null }),
+    updateDatabaseRow: async (_id, _c, _p, payload) => {
+      updatedPayload = payload;
+      return { data: { id: "doc-mirrored" }, error: null };
+    },
+    removeStorageFiles: async (paths) => {
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-mirrored",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Mirrored Signed Test" },
+      uploadedFile: createDummyFile("new_mirrored.pdf"),
+      existingDoc: {
+        id: "doc-mirrored",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: oldPath,
+        signedFilePath: oldPath,
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assert(Boolean(updatedPayload.signed_file_path));
+  assertEquals(updatedPayload.signed_file_name, "new_mirrored.pdf");
+  assertEquals(removedPaths, [oldPath]);
+});
+
+Deno.test("17. Generated source sharing old path: old upload path is not removed", async () => {
+  const removedPaths: string[] = [];
+  const oldPath = "comp-1/proj-1/folder/doc-gen/old.pdf";
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-gen" }, error: null }),
+    updateDatabaseRow: async () => ({ data: { id: "doc-gen" }, error: null }),
+    removeStorageFiles: async (paths) => {
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-gen",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Generated Sharing Test" },
+      uploadedFile: createDummyFile("replacement.pdf"),
+      existingDoc: {
+        id: "doc-gen",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: oldPath,
+        signedFilePath: oldPath,
+        generatedDocxPath: oldPath,
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(removedPaths.includes(oldPath), false);
+});
+
+Deno.test("18. Adding an uploaded file to a signed-only record preserves signed metadata", async () => {
+  let updatedPayload: Record<string, unknown> = {};
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: { id: "doc-signed-only-add-upload" }, error: null }),
+    updateDatabaseRow: async (_id, _c, _p, payload) => {
+      updatedPayload = payload;
+      return { data: { id: "doc-signed-only-add-upload" }, error: null };
+    },
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-signed-only-add-upload",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Add Upload to Signed Only" },
+      uploadedFile: createDummyFile("new_upload.pdf"),
+      existingDoc: {
+        id: "doc-signed-only-add-upload",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        signedFilePath: "signed/only.pdf",
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assert(Boolean(updatedPayload.uploaded_file_path));
+  assertEquals(updatedPayload.signed_file_path, undefined);
+  assertEquals(updatedPayload.signed_file_name, undefined);
+});
+
+Deno.test("19. Insert returning no confirmed ID or wrong ID fails", async () => {
+  const noIdDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ data: null, error: null }),
+    updateDatabaseRow: async () => ({ error: null }),
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  const noIdRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-no-id",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: {},
+      uploadedFile: createDummyFile("test.pdf"),
+      existingDoc: null,
+    },
+    noIdDeps,
+  );
+  assertEquals(noIdRes.success, false);
+  assertEquals(noIdRes.error, "Failed to insert document record in database.");
+
+  const wrongIdDeps: SaveLifecycleDeps = {
+    ...noIdDeps,
+    insertDatabaseRow: async () => ({ data: { id: "wrong-id" }, error: null }),
+  };
+
+  const wrongIdRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-expected-id",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: {},
+      uploadedFile: createDummyFile("test.pdf"),
+      existingDoc: null,
+    },
+    wrongIdDeps,
+  );
+  assertEquals(wrongIdRes.success, false);
+  assertEquals(wrongIdRes.error, "Failed to insert document record in database.");
+});
+
+Deno.test("20. Update returning zero rows or wrong ID fails", async () => {
+  const zeroRowsDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ error: null }),
+    updateDatabaseRow: async () => ({ data: null, error: null }),
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  const zeroRowsRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: {},
+      uploadedFile: null,
+      existingDoc: { id: "doc-1", companyId: "comp-1", projectId: "proj-1" },
+    },
+    zeroRowsDeps,
+  );
+  assertEquals(zeroRowsRes.success, false);
+  assertEquals(zeroRowsRes.error, "Failed to update document record in database.");
+
+  const wrongIdDeps: SaveLifecycleDeps = {
+    ...zeroRowsDeps,
+    updateDatabaseRow: async () => ({ data: { id: "wrong-id" }, error: null }),
+  };
+
+  const wrongIdRes = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-1",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: {},
+      uploadedFile: null,
+      existingDoc: { id: "doc-1", companyId: "comp-1", projectId: "proj-1" },
+    },
+    wrongIdDeps,
+  );
+  assertEquals(wrongIdRes.success, false);
+  assertEquals(wrongIdRes.error, "Failed to update document record in database.");
+});
+
+Deno.test("21. Delete returning zero rows or wrong ID fails", async () => {
+  const zeroRowsDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async () => {},
+    removeStorageFiles: async () => ({ error: null }),
+    deleteDatabaseRow: async () => ({ data: null, error: null }),
+  };
+
+  const zeroRowsRes = await deleteCommunicationDocumentFileLifecycle(
+    { documentId: "doc-1", companyId: "comp-1", projectId: "proj-1" },
+    zeroRowsDeps,
+  );
+  assertEquals(zeroRowsRes.success, false);
+
+  const wrongIdDeps: DeleteLifecycleDeps = {
+    ...zeroRowsDeps,
+    deleteDatabaseRow: async () => ({ data: { id: "wrong-id" }, error: null }),
+  };
+
+  const wrongIdRes = await deleteCommunicationDocumentFileLifecycle(
+    { documentId: "doc-1", companyId: "comp-1", projectId: "proj-1" },
+    wrongIdDeps,
+  );
+  assertEquals(wrongIdRes.success, false);
+});
+
+Deno.test("22. Update and delete are scoped by document, company and project", async () => {
+  let passedUpdateScope: { id: string; companyId: string; projectId: string } | null = null;
+  let passedDeleteScope: { id: string; companyId: string; projectId: string } | null = null;
+
+  const saveDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => ({ error: null }),
+    insertDatabaseRow: async () => ({ error: null }),
+    updateDatabaseRow: async (id, companyId, projectId, _payload) => {
+      passedUpdateScope = { id, companyId, projectId };
+      return { data: { id }, error: null };
+    },
+    removeStorageFiles: async () => ({ error: null }),
+    indexSource: async () => ({ status: "ready" }),
+  };
+
+  await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-scope-1",
+      companyId: "comp-scope-A",
+      projectId: "proj-scope-B",
+      folderName: "folder",
+      payload: { document_title: "Scope test" },
+      uploadedFile: null,
+      existingDoc: {
+        id: "doc-scope-1",
+        companyId: "comp-scope-A",
+        projectId: "proj-scope-B",
+      },
+    },
+    saveDeps,
+  );
+
+  assertEquals(passedUpdateScope, {
+    id: "doc-scope-1",
+    companyId: "comp-scope-A",
+    projectId: "proj-scope-B",
+  });
+
+  const deleteDeps: DeleteLifecycleDeps = {
+    deleteAllIndexes: async () => {},
+    removeStorageFiles: async () => ({ error: null }),
+    deleteDatabaseRow: async (id, companyId, projectId) => {
+      passedDeleteScope = { id, companyId, projectId };
+      return { data: { id }, error: null };
+    },
+  };
+
+  await deleteCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-scope-1",
+      companyId: "comp-scope-A",
+      projectId: "proj-scope-B",
+    },
+    deleteDeps,
+  );
+
+  assertEquals(passedDeleteScope, {
+    id: "doc-scope-1",
+    companyId: "comp-scope-A",
+    projectId: "proj-scope-B",
+  });
+});
+
+Deno.test("23. Thrown insert cleans up only the uncommitted new object and does not index", async () => {
+  let uploadedPath = "";
+  const removedPaths: string[] = [];
+  let indexAttempts = 0;
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async (path) => {
+      uploadedPath = path;
+      return { error: null };
+    },
+    insertDatabaseRow: async () => {
+      throw new Error("Unexpected database transport failure");
+    },
+    updateDatabaseRow: async () => {
+      throw new Error("Update must not run for an insert");
+    },
+    removeStorageFiles: async (paths) => {
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => {
+      indexAttempts++;
+      return { status: "ready" };
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-thrown-insert",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Thrown insert" },
+      uploadedFile: createDummyFile("new.pdf"),
+      existingDoc: null,
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, false);
+  assertEquals(
+    result.error,
+    "Failed to insert document record in database.",
+  );
+  assert(uploadedPath.length > 0);
+  assertEquals(removedPaths, [uploadedPath]);
+  assertEquals(indexAttempts, 0);
+});
+
+Deno.test("24. Thrown update cleans up only the new object, preserves the old object and does not index", async () => {
+  const oldPath = "comp-1/proj-1/folder/doc-thrown-update/old.pdf";
+  let uploadedPath = "";
+  const removedPaths: string[] = [];
+  let indexAttempts = 0;
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async (path) => {
+      uploadedPath = path;
+      return { error: null };
+    },
+    insertDatabaseRow: async () => {
+      throw new Error("Insert must not run for an update");
+    },
+    updateDatabaseRow: async () => {
+      throw new Error("Unexpected database transport failure");
+    },
+    removeStorageFiles: async (paths) => {
+      removedPaths.push(...paths);
+      return { error: null };
+    },
+    indexSource: async () => {
+      indexAttempts++;
+      return { status: "ready" };
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-thrown-update",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Thrown update" },
+      uploadedFile: createDummyFile("replacement.pdf"),
+      existingDoc: {
+        id: "doc-thrown-update",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: oldPath,
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, false);
+  assertEquals(
+    result.error,
+    "Failed to update document record in database.",
+  );
+  assert(uploadedPath.length > 0);
+  assertEquals(removedPaths, [uploadedPath]);
+  assertEquals(removedPaths.includes(oldPath), false);
+  assertEquals(indexAttempts, 0);
+});
+
+Deno.test("25. Index failure occurs once before eligible old-object cleanup", async () => {
+  const executionOrder: string[] = [];
+  const oldPath = "comp-1/proj-1/folder/doc-index-order/old.pdf";
+  let indexAttempts = 0;
+
+  const mockDeps: SaveLifecycleDeps = {
+    uploadStorageFile: async () => {
+      executionOrder.push("upload_new");
+      return { error: null };
+    },
+    insertDatabaseRow: async () => {
+      throw new Error("Insert must not run for an update");
+    },
+    updateDatabaseRow: async () => {
+      executionOrder.push("update_db");
+      return { data: { id: "doc-index-order" }, error: null };
+    },
+    removeStorageFiles: async (paths) => {
+      assertEquals(paths, [oldPath]);
+      executionOrder.push("remove_old_storage");
+      return { error: null };
+    },
+    indexSource: async () => {
+      indexAttempts++;
+      executionOrder.push("index");
+      throw new ProjectAdvisorFileIndexServiceError(
+        "FILE_INDEX_INTERNAL_ERROR",
+        true,
+      );
+    },
+  };
+
+  const result = await saveCommunicationDocumentFileLifecycle(
+    {
+      documentId: "doc-index-order",
+      companyId: "comp-1",
+      projectId: "proj-1",
+      folderName: "folder",
+      payload: { document_title: "Index ordering" },
+      uploadedFile: createDummyFile("replacement.pdf"),
+      existingDoc: {
+        id: "doc-index-order",
+        companyId: "comp-1",
+        projectId: "proj-1",
+        uploadedFilePath: oldPath,
+      },
+    },
+    mockDeps,
+  );
+
+  assertEquals(result.success, true);
+  assertEquals(indexAttempts, 1);
+  assert(result.warning?.includes("temporarily unavailable"));
+  assertEquals(executionOrder, [
+    "upload_new",
+    "update_db",
+    "index",
+    "remove_old_storage",
+  ]);
+});

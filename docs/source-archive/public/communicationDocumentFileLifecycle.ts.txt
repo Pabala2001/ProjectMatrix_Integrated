@@ -1,0 +1,404 @@
+/*******************************************************************************
+ * 2. src/pages/Communication/communicationDocumentFileLifecycle.ts
+ *******************************************************************************/
+import { supabase } from "../../lib/supabase";
+import {
+  projectAdvisorFileIndexService,
+  ProjectAdvisorFileIndexResult,
+} from "../../services/projectAdvisorFileIndexService";
+
+export interface CommDocument {
+  id: string;
+  companyId: string;
+  projectId: string;
+  folderName: string;
+  title: string;
+  docNumber: string;
+  revision: string;
+  date: string;
+  sender: string;
+  recipient: string;
+  subject: string;
+  description: string;
+  status: "Draft" | "Submitted" | "Under Review" | "Approved" | "Closed" | "Superseded";
+  signedStatus: "Not Signed" | "Signed" | "Awaiting Signature";
+  uploadedFilePath?: string;
+  uploadedFileName?: string;
+  uploadedFileType?: string;
+  uploadedFileSize?: number;
+  signedFilePath?: string;
+  signedFileName?: string;
+  signedFileType?: string;
+  signedFileSize?: number;
+  generatedDocxPath?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export function mapDbToCommDocument(row: any): CommDocument {
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    projectId: row.project_id,
+    folderName: row.folder_name,
+    title: row.document_title || row.rfi_description || "Untitled Document",
+    docNumber: row.document_number || row.rfi_number || row.contract_number || "NO-REF",
+    revision: row.revision || "0",
+    date: row.document_date || row.date_initiated || (row.created_at ? row.created_at.split("T")[0] : ""),
+    sender: row.sender || row.originator || row.from_company || "N/A",
+    recipient: row.recipient || row.attention || row.to_company || "N/A",
+    subject: row.subject || row.document_title || "No Subject",
+    description: row.description || row.rfi_description || "",
+    status: row.status || "Draft",
+    signedStatus: row.signed_status || "Not Signed",
+    uploadedFilePath: row.uploaded_file_path || undefined,
+    uploadedFileName: row.uploaded_file_name || undefined,
+    uploadedFileType: row.uploaded_file_type || undefined,
+    uploadedFileSize: row.uploaded_file_size !== undefined && row.uploaded_file_size !== null ? Number(row.uploaded_file_size) : undefined,
+    signedFilePath: row.signed_file_path || undefined,
+    signedFileName: row.signed_file_name || undefined,
+    signedFileType: row.signed_file_type || undefined,
+    signedFileSize: row.signed_file_size !== undefined && row.signed_file_size !== null ? Number(row.signed_file_size) : undefined,
+    generatedDocxPath: row.generated_docx_path || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export interface SaveLifecycleParams {
+  documentId: string;
+  companyId: string;
+  projectId: string;
+  folderName: string;
+  payload: Record<string, unknown>;
+  uploadedFile: File | null;
+  existingDoc: Partial<CommDocument> | null;
+}
+
+export interface SaveLifecycleDeps {
+  uploadStorageFile: (
+    path: string,
+    file: File
+  ) => Promise<{ error: any }>;
+  insertDatabaseRow: (
+    payload: Record<string, unknown>
+  ) => Promise<{ data?: any; error: any }>;
+  updateDatabaseRow: (
+    id: string,
+    companyId: string,
+    projectId: string,
+    payload: Record<string, unknown>
+  ) => Promise<{ data?: any; error: any }>;
+  removeStorageFiles: (
+    paths: string[]
+  ) => Promise<{ error: any }>;
+  indexSource: (
+    documentId: string,
+    sourceKind: "uploaded" | "signed" | "generated_docx"
+  ) => Promise<ProjectAdvisorFileIndexResult>;
+}
+
+export interface SaveLifecycleResult {
+  success: boolean;
+  documentId?: string;
+  error?: string;
+  warning?: string;
+  message?: string;
+  indexResult?: ProjectAdvisorFileIndexResult;
+}
+
+const defaultSaveDeps: SaveLifecycleDeps = {
+  uploadStorageFile: async (path, file) => {
+    const { error } = await supabase.storage
+      .from("communication-documents")
+      .upload(path, file, { upsert: true });
+    return { error };
+  },
+  insertDatabaseRow: async (payload) => {
+    const { data, error } = await supabase
+      .from("communication_documents")
+      .insert([payload])
+      .select("id")
+      .maybeSingle();
+    return { data, error };
+  },
+  updateDatabaseRow: async (id, companyId, projectId, payload) => {
+    const { data, error } = await supabase
+      .from("communication_documents")
+      .update(payload)
+      .eq("id", id)
+      .eq("company_id", companyId)
+      .eq("project_id", projectId)
+      .select("id")
+      .maybeSingle();
+    return { data, error };
+  },
+  removeStorageFiles: async (paths) => {
+    if (!paths.length) return { error: null };
+    const { error } = await supabase.storage
+      .from("communication-documents")
+      .remove(paths);
+    return { error };
+  },
+  indexSource: async (documentId, sourceKind) => {
+    return projectAdvisorFileIndexService.indexCommunicationDocumentSource(
+      documentId,
+      sourceKind
+    );
+  },
+};
+
+export async function saveCommunicationDocumentFileLifecycle(
+  params: SaveLifecycleParams,
+  deps: SaveLifecycleDeps = defaultSaveDeps
+): Promise<SaveLifecycleResult> {
+  const {
+    documentId,
+    companyId,
+    projectId,
+    folderName,
+    payload,
+    uploadedFile,
+    existingDoc,
+  } = params;
+
+  let newUploadedPath: string | undefined = undefined;
+
+  if (uploadedFile) {
+    const timestamp = Date.now();
+    const sanitizedName = uploadedFile.name.replace(/[^a-zA-Z0-9.-]/g, "_");
+    newUploadedPath = `${companyId}/${projectId}/${folderName}/${documentId}/${timestamp}_${sanitizedName}`;
+
+    const { error: uploadErr } = await deps.uploadStorageFile(
+      newUploadedPath,
+      uploadedFile
+    );
+
+    if (uploadErr) {
+      console.error("Storage upload error:", uploadErr);
+      return {
+        success: false,
+        error: "Failed to upload document file.",
+      };
+    }
+
+    payload.uploaded_file_path = newUploadedPath;
+    payload.uploaded_file_name = uploadedFile.name;
+    payload.uploaded_file_type = uploadedFile.type;
+    payload.uploaded_file_size = uploadedFile.size;
+
+    const prevUploadedPath = existingDoc?.uploadedFilePath;
+    const prevSignedPath = existingDoc?.signedFilePath;
+
+    const shouldMirrorToSigned =
+      !existingDoc ||
+      !prevSignedPath ||
+      prevSignedPath === prevUploadedPath;
+
+    if (shouldMirrorToSigned) {
+      payload.signed_file_path = newUploadedPath;
+      payload.signed_file_name = uploadedFile.name;
+      payload.signed_file_type = uploadedFile.type;
+      payload.signed_file_size = uploadedFile.size;
+    }
+  }
+
+  let dbResult: { data?: any; error: any };
+  const isEdit = Boolean(existingDoc);
+
+  if (isEdit) {
+    dbResult = await deps.updateDatabaseRow(
+      documentId,
+      companyId,
+      projectId,
+      payload
+    );
+  } else {
+    payload.id = documentId;
+    dbResult = await deps.insertDatabaseRow(payload);
+  }
+
+  if (dbResult.error || !dbResult.data || dbResult.data.id !== documentId) {
+    console.error("Database save error:", dbResult.error);
+
+    if (newUploadedPath) {
+      await deps.removeStorageFiles([newUploadedPath]);
+    }
+
+    return {
+      success: false,
+      error: isEdit
+        ? "Failed to update document record in database."
+        : "Failed to insert document record in database.",
+    };
+  }
+
+  if (uploadedFile && existingDoc?.uploadedFilePath) {
+    const prevUploadedPath = existingDoc.uploadedFilePath;
+
+    const nextUploadedPath = newUploadedPath;
+    const nextSignedPath =
+      (payload.signed_file_path as string | undefined) ??
+      existingDoc.signedFilePath;
+    const nextGeneratedPath = existingDoc.generatedDocxPath;
+
+    const isStillUsed =
+      prevUploadedPath === nextUploadedPath ||
+      prevUploadedPath === nextSignedPath ||
+      prevUploadedPath === nextGeneratedPath;
+
+    if (!isStillUsed) {
+      await deps.removeStorageFiles([prevUploadedPath]);
+    }
+  }
+
+  const effectiveUploadedPath =
+    newUploadedPath || existingDoc?.uploadedFilePath;
+
+  let warning: string | undefined = undefined;
+  let indexResult: ProjectAdvisorFileIndexResult | undefined = undefined;
+
+  if (effectiveUploadedPath) {
+    try {
+      indexResult = await deps.indexSource(documentId, "uploaded");
+      if (indexResult.status === "unsupported") {
+        warning =
+          "Document saved locally. File format is unavailable to Project Advisor indexing.";
+      }
+    } catch (indexErr: any) {
+      console.warn(
+        "File indexing failed, but document save was preserved locally:",
+        indexErr
+      );
+      warning =
+        "Document saved locally. Project Advisor indexing service is temporarily unavailable.";
+    }
+  }
+
+  return {
+    success: true,
+    documentId,
+    warning,
+    message: isEdit
+      ? "Document updated successfully."
+      : "Document saved successfully.",
+    indexResult,
+  };
+}
+
+export interface DeleteLifecycleParams {
+  documentId: string;
+  companyId: string;
+  projectId: string;
+  uploadedFilePath?: string;
+  signedFilePath?: string;
+  generatedDocxPath?: string;
+}
+
+export interface DeleteLifecycleDeps {
+  deleteAllIndexes: (documentId: string) => Promise<void>;
+  removeStorageFiles: (
+    paths: string[]
+  ) => Promise<{ error: any }>;
+  deleteDatabaseRow: (
+    id: string,
+    companyId: string,
+    projectId: string
+  ) => Promise<{ data?: any; error: any }>;
+}
+
+export interface DeleteLifecycleResult {
+  success: boolean;
+  error?: string;
+  message?: string;
+}
+
+const defaultDeleteDeps: DeleteLifecycleDeps = {
+  deleteAllIndexes: async (documentId) => {
+    await projectAdvisorFileIndexService.deleteAllCommunicationDocumentIndexes(
+      documentId
+    );
+  },
+  removeStorageFiles: async (paths) => {
+    if (!paths.length) return { error: null };
+    const { error } = await supabase.storage
+      .from("communication-documents")
+      .remove(paths);
+    return { error };
+  },
+  deleteDatabaseRow: async (id, companyId, projectId) => {
+    const { data, error } = await supabase
+      .from("communication_documents")
+      .delete()
+      .eq("id", id)
+      .eq("company_id", companyId)
+      .eq("project_id", projectId)
+      .select("id")
+      .maybeSingle();
+    return { data, error };
+  },
+};
+
+export async function deleteCommunicationDocumentFileLifecycle(
+  params: DeleteLifecycleParams,
+  deps: DeleteLifecycleDeps = defaultDeleteDeps
+): Promise<DeleteLifecycleResult> {
+  const {
+    documentId,
+    companyId,
+    projectId,
+    uploadedFilePath,
+    signedFilePath,
+    generatedDocxPath,
+  } = params;
+
+  try {
+    await deps.deleteAllIndexes(documentId);
+  } catch (indexErr) {
+    console.error("Failed to delete indexes:", indexErr);
+    return {
+      success: false,
+      error:
+        "The document could not be deleted safely. No further deletion steps were completed. Please try again.",
+    };
+  }
+
+  const storagePaths: string[] = [];
+  if (uploadedFilePath) storagePaths.push(uploadedFilePath);
+  if (signedFilePath) storagePaths.push(signedFilePath);
+  if (generatedDocxPath) storagePaths.push(generatedDocxPath);
+
+  const uniquePaths = Array.from(new Set(storagePaths));
+
+  if (uniquePaths.length > 0) {
+    const { error: storageErr } = await deps.removeStorageFiles(uniquePaths);
+    if (storageErr) {
+      console.error("Failed to remove storage files:", storageErr);
+      return {
+        success: false,
+        error:
+          "The document could not be deleted safely. No further deletion steps were completed. Please try again.",
+      };
+    }
+  }
+
+  const { data: deletedRow, error: dbErr } = await deps.deleteDatabaseRow(
+    documentId,
+    companyId,
+    projectId
+  );
+
+  if (dbErr || !deletedRow || deletedRow.id !== documentId) {
+    console.error("Failed to delete database row:", dbErr);
+    return {
+      success: false,
+      error:
+        "The document could not be deleted safely. No further deletion steps were completed. Please try again.",
+    };
+  }
+
+  return {
+    success: true,
+    message: "Document and all linked files completely deleted.",
+  };
+}
